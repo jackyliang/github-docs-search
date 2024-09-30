@@ -1,6 +1,8 @@
 # Github Documentation Search
 
-This is a Github Documentation Search built with Timescale DB, pgvectorscale, and Python FastAPI. It allows you to load data from a text file, create embeddings, and perform semantic search over Github documentation data. 
+This is a Github Documentation Search Sample App built with Timescale DB, pgvectorscale, and Python FastAPI. 
+
+This Sample App lets you easily have a document search app setup and running on your local machine. Additionally, it allows you to load data from text files, create embeddings, chunks your data, and perform semantic search over the data. 
 
 Built by Jacky Liang for the TimescaleDB Developer Advocate role.
 
@@ -11,6 +13,8 @@ Some Github docs files are included in `/sample-data/` containing README for
 - pgvectorscale
 - pgai
 - pgvector
+
+Feel free to add your own Github README.md files to the `/sample-data/` folder.
 
 ## Installation and Setup Instructions
 
@@ -44,9 +48,9 @@ Some Github docs files are included in `/sample-data/` containing README for
      ```
 
 3. **Database Setup**
-   - Install PostgreSQL 15 or later.
-   - Create a new database for this project.
-   - Install the `vectorscale` extension in your PostgreSQL instance.
+   - Create a new Timescale DB instance on [Timescale Cloud](https://console.cloud.timescale.com/signup).
+   - Set a password for the user and update your `DATABASE_URL` in the `.env` file.
+   - Make sure to setup the correct `DATABASE_URL` in the `.env` file.
 
 4. **Environment Variables**
    - Create a `.env` file in the same directory as `docs_server.py` with the following content:
@@ -58,6 +62,13 @@ Some Github docs files are included in `/sample-data/` containing README for
      ```
 
    - Replace the placeholders with your actual database credentials and API keys.
+   - Alternatively, you can set the environment variables in your operating system. For example, on Linux or MacOS, you can set the environment variables with the following commands:
+
+     ```bash
+     export DATABASE_URL=postgresql://username:password@localhost:5432/your_database_name
+     export ANTHROPIC_API_KEY=your_anthropic_api_key
+     export OPENAI_API_KEY=your_openai_api_key
+     ```
 
 5. **Running the Server**
    - Start the server with:
@@ -69,6 +80,9 @@ Some Github docs files are included in `/sample-data/` containing README for
    - The server will start on `http://localhost:8000`.
 
 6. **Using the API**
+
+   - Note that a live playground for API docs are also available at `http://localhost:8000/docs`.
+
    - Load data:
      ```bash
      curl -X POST "http://localhost:8000/load_data" \
@@ -98,10 +112,14 @@ Some Github docs files are included in `/sample-data/` containing README for
 6. Use the `/load_data` endpoint to load the data into the database
 
 ## Further developments
-- [ ] Use a better chunking algorithm like semantic chunking
-- [ ] Use pgai to generate embeddings and generate responses
 
-7. **Notes**
+- [ ] Use pgai to generate embeddings and generate responses
+- [ ] Use a better chunking algorithm like semantic chunking
+- [ ] Automatically load README.md files from Github repositories
+- [ ] Implement one-click deployment to Vercel
+
+## Notes 
+
    - Ensure Timescale DB is configured to handle vector operations.
    - The script assumes you have the necessary permissions to create extensions and tables in your database.
    - Adjust the `CharacterTextSplitter` parameters in the `read_custom_dataset` function if you need different chunking behavior.
