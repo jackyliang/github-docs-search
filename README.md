@@ -8,14 +8,6 @@ Built by Jacky Liang for the TimescaleDB Developer Advocate role.
 
 ![image](https://github.com/user-attachments/assets/6e9274c5-ba01-48eb-baea-453dfe9e64b1)
 
-Some Github docs files are included in `/sample-data/` containing README for
-- Timescale DB
-- pgvectorscale
-- pgai
-- pgvector
-
-Feel free to add your own Github README.md files to the `/sample-data/` folder.
-
 ## Installation and Setup Instructions
 
 1. **Python Environment**
@@ -110,6 +102,14 @@ Feel free to add your own Github README.md files to the `/sample-data/` folder.
 4. Copy the contents
 5. Paste the contents into a text file
 6. Use the `/load_data` endpoint to load the data into the database
+
+Some Github docs files are included in `/sample-data/` containing README for
+- [Timescale DB](https://github.com/timescale/timescaledb/blob/main/README.md)
+- [pgvectorscale](https://github.com/timescale/pgvectorscale/blob/main/README.md)
+- [pgai](https://github.com/timescale/pgai/blob/main/README.md)
+- [pgvector](https://github.com/pgvector/pgvector/blob/master/README.md)
+
+Feel free to add your own Github README.md files to the `/sample-data/` folder.
 
 ## Further developments
 
