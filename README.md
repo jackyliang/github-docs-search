@@ -86,6 +86,19 @@ Some Github docs files are included in `/sample-data/` containing README for
      curl "http://localhost:8000/head_documents"
      ```
 
+## How to get Github documentation data
+
+1. Go to a Github repo of your choice
+2. Click on the `README.md` file
+3. Click on the `Raw` button
+4. Copy the contents
+5. Paste the contents into a text file
+6. Use the `/load_data` endpoint to load the data into the database
+
+## Further developments
+- [ ] Use a better chunking algorithm like semantic chunking
+- [ ] Use pgai to generate embeddings and generate responses
+
 7. **Notes**
    - Ensure Timescale DB is configured to handle vector operations.
    - The script assumes you have the necessary permissions to create extensions and tables in your database.
