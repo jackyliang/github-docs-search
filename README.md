@@ -2,6 +2,8 @@
 
 This is a Github Documentation Search built with Timescale DB, pgvectorscale, and Python FastAPI. It allows you to load data from a text file, create embeddings, and perform similarity searches. 
 
+![image](https://github.com/user-attachments/assets/6e9274c5-ba01-48eb-baea-453dfe9e64b1)
+
 Some Github docs files are included in `/sample-data/` containing README for
 - Timescale DB
 - pgvectorscale
