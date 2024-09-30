@@ -1,6 +1,8 @@
-# TimescaleDB Developer Advocate Take Home Assignment
+# Github Documentation Search
 
-This is a Github Documentation Search built with Timescale DB, pgvectorscale, and Python FastAPI. It allows you to load data from a text file, create embeddings, and perform similarity searches. 
+This is a Github Documentation Search built with Timescale DB, pgvectorscale, and Python FastAPI. It allows you to load data from a text file, create embeddings, and perform semantic search over Github documentation data. 
+
+Built by Jacky Liang for the TimescaleDB Developer Advocate role.
 
 ![image](https://github.com/user-attachments/assets/6e9274c5-ba01-48eb-baea-453dfe9e64b1)
 
