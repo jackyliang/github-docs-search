@@ -1,10 +1,10 @@
-# Github Documentation Search
+# Github Documentation Search Sample App
 
 This is a Github Documentation Search Sample App built with Timescale DB, pgvectorscale, and Python FastAPI. 
 
 This Sample App lets you easily have a document search app setup and running on your local machine. Additionally, it allows you to load data from text files, create embeddings, chunks your data, and perform semantic search over the data. 
 
-Built by Jacky Liang for the TimescaleDB Developer Advocate role.
+*Built by Jacky Liang*
 
 ![image](https://github.com/user-attachments/assets/6e9274c5-ba01-48eb-baea-453dfe9e64b1)
 
