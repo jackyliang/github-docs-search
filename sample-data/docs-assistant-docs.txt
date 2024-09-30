@@ -1,0 +1,138 @@
+Here's a detailed step-by-step explanation of how `docs_server.py` works:
+
+1. **Imports and Setup**
+   - The script imports necessary libraries including FastAPI, psycopg2, Anthropic, OpenAI, and others.
+   - It sets up a FastAPI application with CORS middleware to allow cross-origin requests.
+
+2. **Database Connection**
+   - Establishes a connection to a PostgreSQL database using the `DATABASE_URL` environment variable.
+   - Creates a `vectorscale` extension in the database if it doesn't exist.
+   - Sets up a `documents` table with columns for id, contents, and embedding (a vector of 1536 dimensions).
+
+3. **API Clients**
+   - Initializes OpenAI and Anthropic API clients for later use.
+
+4. **Embedding Function**
+   - Defines a `get_embedding` function that uses OpenAI's text-embedding-ada-002 model to generate embeddings for given text.
+   - The embeddings are normalized using numpy before being returned.
+
+5. **Data Loading Endpoint (`/load_data`)**
+   - Accepts a file path as input.
+   - Reads the file content using the `read_custom_dataset` function.
+   - Chunks the content using `CharacterTextSplitter`:
+     - Splits on double newlines (`\n\n`).
+     - Creates chunks of 256 characters with 20 character overlap.
+     - This chunking method allows for context-aware splitting of the document.
+   - Generates embeddings for each chunk using the `get_embedding` function.
+   - Inserts the chunks and their embeddings into the `documents` table.
+   - Creates a DiskANN index on the embedding column for efficient similarity search.
+
+6. **Query Endpoint (`/query`)**
+   - Accepts a question as input.
+   - Uses the `relevant_search` function to find similar documents:
+     - Generates an embedding for the query.
+     - Performs a cosine similarity search in the database to find the 20 most relevant documents.
+   - Passes the relevant documents and the query to the `rag_function`:
+     - Combines the relevant documents into a context.
+     - Uses Anthropic's Claude 3.5 Sonnet model to generate a response based on the context and query.
+   - Returns the AI-generated response along with the relevant documents and their cosine distances.
+
+7. **Head Documents Endpoint (`/head_documents`)**
+   - Retrieves the first 5 (by default) documents from the database.
+   - Returns their id, contents, and a truncated version of their embedding.
+
+8. **Utility Functions**
+   - `relevant_search`: Performs the similarity search in the database.
+   - `read_custom_dataset`: Reads and chunks the input file.
+   - `rag_function`: Implements the Retrieval-Augmented Generation (RAG) logic.
+
+9. **Main Execution**
+   - If the script is run directly, it starts a Uvicorn server on port 8000.
+
+This script implements a RAG system using a vector database (PostgreSQL with vectorscale extension) for efficient similarity search. It allows for loading custom datasets, querying the data using natural language, and retrieving AI-generated responses based on the most relevant context from the database. The chunking method ensures that the document is split into manageable pieces while maintaining context, which is crucial for accurate retrieval and generation.
+
+Certainly! Here are the installation and setup instructions for the `docs_server.py` script:
+
+## Installation and Setup Instructions
+
+1. **Python Environment**
+   - Ensure you have Python 3.7+ installed on your system.
+   - It's recommended to use a virtual environment:
+
+     ```bash
+     python -m venv venv
+     source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
+     ```
+
+2. **Install Dependencies**
+   - Create a `requirements.txt` file with the following content:
+
+     ```
+     fastapi
+     uvicorn
+     psycopg2-binary
+     anthropic
+     openai
+     langchain
+     numpy
+     pydantic
+     ```
+
+   - Install the dependencies:
+
+     ```bash
+     pip install -r requirements.txt
+     ```
+
+3. **Database Setup**
+   - Install PostgreSQL 15 or later.
+   - Create a new database for this project.
+   - Install the `vectorscale` extension in your PostgreSQL instance.
+
+4. **Environment Variables**
+   - Create a `.env` file in the same directory as `docs_server.py` with the following content:
+
+     ```
+     DATABASE_URL=postgresql://username:password@localhost:5432/your_database_name
+     ANTHROPIC_API_KEY=your_anthropic_api_key
+     OPENAI_API_KEY=your_openai_api_key
+     ```
+
+   - Replace the placeholders with your actual database credentials and API keys.
+
+5. **Running the Server**
+   - Start the server with:
+
+     ```bash
+     python docs_server.py
+     ```
+
+   - The server will start on `http://localhost:8000`.
+
+6. **Using the API**
+   - Load data:
+     ```bash
+     curl -X POST "http://localhost:8000/load_data" \
+          -H "Content-Type: application/json" \
+          -d '{"file_path": "/path/to/your/data/file.txt"}'
+     ```
+
+   - Query the data:
+     ```bash
+     curl -X POST "http://localhost:8000/query" \
+          -H "Content-Type: application/json" \
+          -d '{"question": "What is the main topic of this document?"}'
+     ```
+
+   - View the first few documents:
+     ```bash
+     curl "http://localhost:8000/head_documents"
+     ```
+
+7. **Notes**
+   - Ensure your PostgreSQL database is configured to handle vector operations.
+   - The script assumes you have the necessary permissions to create extensions and tables in your database.
+   - Adjust the `CharacterTextSplitter` parameters in the `read_custom_dataset` function if you need different chunking behavior.
+   - The script uses OpenAI's embedding model and Anthropic's Claude model. Ensure you have sufficient API credits.
+
+By following these steps, you should be able to set up and run the `docs_server.py` script, creating a functional RAG system with a vector database backend.

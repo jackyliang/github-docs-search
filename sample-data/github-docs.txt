@@ -1,0 +1,1823 @@
+# pgvector
+
+Open-source vector similarity search for Postgres
+
+Store your vectors with the rest of your data. Supports:
+
+- exact and approximate nearest neighbor search
+- single-precision, half-precision, binary, and sparse vectors
+- L2 distance, inner product, cosine distance, L1 distance, Hamming distance, and Jaccard distance
+- any [language](#languages) with a Postgres client
+
+Plus [ACID](https://en.wikipedia.org/wiki/ACID) compliance, point-in-time recovery, JOINs, and all of the other [great features](https://www.postgresql.org/about/) of Postgres
+
+[![Build Status](https://github.com/pgvector/pgvector/actions/workflows/build.yml/badge.svg)](https://github.com/pgvector/pgvector/actions)
+
+## Installation
+
+### Linux and Mac
+
+Compile and install the extension (supports Postgres 12+)
+
+```sh
+cd /tmp
+git clone --branch v0.7.4 https://github.com/pgvector/pgvector.git
+cd pgvector
+make
+make install # may need sudo
+```
+
+See the [installation notes](#installation-notes---linux-and-mac) if you run into issues
+
+You can also install it with [Docker](#docker), [Homebrew](#homebrew), [PGXN](#pgxn), [APT](#apt), [Yum](#yum), [pkg](#pkg), or [conda-forge](#conda-forge), and it comes preinstalled with [Postgres.app](#postgresapp) and many [hosted providers](#hosted-postgres). There are also instructions for [GitHub Actions](https://github.com/pgvector/setup-pgvector).
+
+### Windows
+
+Ensure [C++ support in Visual Studio](https://learn.microsoft.com/en-us/cpp/build/building-on-the-command-line?view=msvc-170#download-and-install-the-tools) is installed, and run:
+
+```cmd
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+```
+
+Note: The exact path will vary depending on your Visual Studio version and edition
+
+Then use `nmake` to build:
+
+```cmd
+set "PGROOT=C:\Program Files\PostgreSQL\16"
+cd %TEMP%
+git clone --branch v0.7.4 https://github.com/pgvector/pgvector.git
+cd pgvector
+nmake /F Makefile.win
+nmake /F Makefile.win install
+```
+
+Note: Postgres 17 is not supported yet due to an upstream issue
+
+See the [installation notes](#installation-notes---windows) if you run into issues
+
+You can also install it with [Docker](#docker) or [conda-forge](#conda-forge).
+
+## Getting Started
+
+Enable the extension (do this once in each database where you want to use it)
+
+```tsql
+CREATE EXTENSION vector;
+```
+
+Create a vector column with 3 dimensions
+
+```sql
+CREATE TABLE items (id bigserial PRIMARY KEY, embedding vector(3));
+```
+
+Insert vectors
+
+```sql
+INSERT INTO items (embedding) VALUES ('[1,2,3]'), ('[4,5,6]');
+```
+
+Get the nearest neighbors by L2 distance
+
+```sql
+SELECT * FROM items ORDER BY embedding <-> '[3,1,2]' LIMIT 5;
+```
+
+Also supports inner product (`<#>`), cosine distance (`<=>`), and L1 distance (`<+>`, added in 0.7.0)
+
+Note: `<#>` returns the negative inner product since Postgres only supports `ASC` order index scans on operators
+
+## Storing
+
+Create a new table with a vector column
+
+```sql
+CREATE TABLE items (id bigserial PRIMARY KEY, embedding vector(3));
+```
+
+Or add a vector column to an existing table
+
+```sql
+ALTER TABLE items ADD COLUMN embedding vector(3);
+```
+
+Also supports [half-precision](#half-precision-vectors), [binary](#binary-vectors), and [sparse](#sparse-vectors) vectors
+
+Insert vectors
+
+```sql
+INSERT INTO items (embedding) VALUES ('[1,2,3]'), ('[4,5,6]');
+```
+
+Or load vectors in bulk using `COPY` ([example](https://github.com/pgvector/pgvector-python/blob/master/examples/loading/example.py))
+
+```sql
+COPY items (embedding) FROM STDIN WITH (FORMAT BINARY);
+```
+
+Upsert vectors
+
+```sql
+INSERT INTO items (id, embedding) VALUES (1, '[1,2,3]'), (2, '[4,5,6]')
+    ON CONFLICT (id) DO UPDATE SET embedding = EXCLUDED.embedding;
+```
+
+Update vectors
+
+```sql
+UPDATE items SET embedding = '[1,2,3]' WHERE id = 1;
+```
+
+Delete vectors
+
+```sql
+DELETE FROM items WHERE id = 1;
+```
+
+## Querying
+
+Get the nearest neighbors to a vector
+
+```sql
+SELECT * FROM items ORDER BY embedding <-> '[3,1,2]' LIMIT 5;
+```
+
+Supported distance functions are:
+
+- `<->` - L2 distance
+- `<#>` - (negative) inner product
+- `<=>` - cosine distance
+- `<+>` - L1 distance (added in 0.7.0)
+- `<~>` - Hamming distance (binary vectors, added in 0.7.0)
+- `<%>` - Jaccard distance (binary vectors, added in 0.7.0)
+
+Get the nearest neighbors to a row
+
+```sql
+SELECT * FROM items WHERE id != 1 ORDER BY embedding <-> (SELECT embedding FROM items WHERE id = 1) LIMIT 5;
+```
+
+Get rows within a certain distance
+
+```sql
+SELECT * FROM items WHERE embedding <-> '[3,1,2]' < 5;
+```
+
+Note: Combine with `ORDER BY` and `LIMIT` to use an index
+
+#### Distances
+
+Get the distance
+
+```sql
+SELECT embedding <-> '[3,1,2]' AS distance FROM items;
+```
+
+For inner product, multiply by -1 (since `<#>` returns the negative inner product)
+
+```tsql
+SELECT (embedding <#> '[3,1,2]') * -1 AS inner_product FROM items;
+```
+
+For cosine similarity, use 1 - cosine distance
+
+```sql
+SELECT 1 - (embedding <=> '[3,1,2]') AS cosine_similarity FROM items;
+```
+
+#### Aggregates
+
+Average vectors
+
+```sql
+SELECT AVG(embedding) FROM items;
+```
+
+Average groups of vectors
+
+```sql
+SELECT category_id, AVG(embedding) FROM items GROUP BY category_id;
+```
+
+## Indexing
+
+By default, pgvector performs exact nearest neighbor search, which provides perfect recall.
+
+You can add an index to use approximate nearest neighbor search, which trades some recall for speed. Unlike typical indexes, you will see different results for queries after adding an approximate index.
+
+Supported index types are:
+
+- [HNSW](#hnsw)
+- [IVFFlat](#ivfflat)
+
+## HNSW
+
+An HNSW index creates a multilayer graph. It has better query performance than IVFFlat (in terms of speed-recall tradeoff), but has slower build times and uses more memory. Also, an index can be created without any data in the table since there isn’t a training step like IVFFlat.
+
+Add an index for each distance function you want to use.
+
+L2 distance
+
+```sql
+CREATE INDEX ON items USING hnsw (embedding vector_l2_ops);
+```
+
+Note: Use `halfvec_l2_ops` for `halfvec` and `sparsevec_l2_ops` for `sparsevec` (and similar with the other distance functions)
+
+Inner product
+
+```sql
+CREATE INDEX ON items USING hnsw (embedding vector_ip_ops);
+```
+
+Cosine distance
+
+```sql
+CREATE INDEX ON items USING hnsw (embedding vector_cosine_ops);
+```
+
+L1 distance - added in 0.7.0
+
+```sql
+CREATE INDEX ON items USING hnsw (embedding vector_l1_ops);
+```
+
+Hamming distance - added in 0.7.0
+
+```sql
+CREATE INDEX ON items USING hnsw (embedding bit_hamming_ops);
+```
+
+Jaccard distance - added in 0.7.0
+
+```sql
+CREATE INDEX ON items USING hnsw (embedding bit_jaccard_ops);
+```
+
+Supported types are:
+
+- `vector` - up to 2,000 dimensions
+- `halfvec` - up to 4,000 dimensions (added in 0.7.0)
+- `bit` - up to 64,000 dimensions (added in 0.7.0)
+- `sparsevec` - up to 1,000 non-zero elements (added in 0.7.0)
+
+### Index Options
+
+Specify HNSW parameters
+
+- `m` - the max number of connections per layer (16 by default)
+- `ef_construction` - the size of the dynamic candidate list for constructing the graph (64 by default)
+
+```sql
+CREATE INDEX ON items USING hnsw (embedding vector_l2_ops) WITH (m = 16, ef_construction = 64);
+```
+
+A higher value of `ef_construction` provides better recall at the cost of index build time / insert speed.
+
+### Query Options
+
+Specify the size of the dynamic candidate list for search (40 by default)
+
+```sql
+SET hnsw.ef_search = 100;
+```
+
+A higher value provides better recall at the cost of speed.
+
+Use `SET LOCAL` inside a transaction to set it for a single query
+
+```sql
+BEGIN;
+SET LOCAL hnsw.ef_search = 100;
+SELECT ...
+COMMIT;
+```
+
+### Index Build Time
+
+Indexes build significantly faster when the graph fits into `maintenance_work_mem`
+
+```sql
+SET maintenance_work_mem = '8GB';
+```
+
+A notice is shown when the graph no longer fits
+
+```text
+NOTICE:  hnsw graph no longer fits into maintenance_work_mem after 100000 tuples
+DETAIL:  Building will take significantly more time.
+HINT:  Increase maintenance_work_mem to speed up builds.
+```
+
+Note: Do not set `maintenance_work_mem` so high that it exhausts the memory on the server
+
+Like other index types, it’s faster to create an index after loading your initial data
+
+Starting with 0.6.0, you can also speed up index creation by increasing the number of parallel workers (2 by default)
+
+```sql
+SET max_parallel_maintenance_workers = 7; -- plus leader
+```
+
+For a large number of workers, you may also need to increase `max_parallel_workers` (8 by default)
+
+### Indexing Progress
+
+Check [indexing progress](https://www.postgresql.org/docs/current/progress-reporting.html#CREATE-INDEX-PROGRESS-REPORTING) with Postgres 12+
+
+```sql
+SELECT phase, round(100.0 * blocks_done / nullif(blocks_total, 0), 1) AS "%" FROM pg_stat_progress_create_index;
+```
+
+The phases for HNSW are:
+
+1. `initializing`
+2. `loading tuples`
+
+## IVFFlat
+
+An IVFFlat index divides vectors into lists, and then searches a subset of those lists that are closest to the query vector. It has faster build times and uses less memory than HNSW, but has lower query performance (in terms of speed-recall tradeoff).
+
+Three keys to achieving good recall are:
+
+1. Create the index *after* the table has some data
+2. Choose an appropriate number of lists - a good place to start is `rows / 1000` for up to 1M rows and `sqrt(rows)` for over 1M rows
+3. When querying, specify an appropriate number of [probes](#query-options) (higher is better for recall, lower is better for speed) - a good place to start is `sqrt(lists)`
+
+Add an index for each distance function you want to use.
+
+L2 distance
+
+```sql
+CREATE INDEX ON items USING ivfflat (embedding vector_l2_ops) WITH (lists = 100);
+```
+
+Note: Use `halfvec_l2_ops` for `halfvec` (and similar with the other distance functions)
+
+Inner product
+
+```sql
+CREATE INDEX ON items USING ivfflat (embedding vector_ip_ops) WITH (lists = 100);
+```
+
+Cosine distance
+
+```sql
+CREATE INDEX ON items USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+```
+
+Hamming distance - added in 0.7.0
+
+```sql
+CREATE INDEX ON items USING ivfflat (embedding bit_hamming_ops) WITH (lists = 100);
+```
+
+Supported types are:
+
+- `vector` - up to 2,000 dimensions
+- `halfvec` - up to 4,000 dimensions (added in 0.7.0)
+- `bit` - up to 64,000 dimensions (added in 0.7.0)
+
+### Query Options
+
+Specify the number of probes (1 by default)
+
+```sql
+SET ivfflat.probes = 10;
+```
+
+A higher value provides better recall at the cost of speed, and it can be set to the number of lists for exact nearest neighbor search (at which point the planner won’t use the index)
+
+Use `SET LOCAL` inside a transaction to set it for a single query
+
+```sql
+BEGIN;
+SET LOCAL ivfflat.probes = 10;
+SELECT ...
+COMMIT;
+```
+
+### Index Build Time
+
+Speed up index creation on large tables by increasing the number of parallel workers (2 by default)
+
+```sql
+SET max_parallel_maintenance_workers = 7; -- plus leader
+```
+
+For a large number of workers, you may also need to increase `max_parallel_workers` (8 by default)
+
+### Indexing Progress
+
+Check [indexing progress](https://www.postgresql.org/docs/current/progress-reporting.html#CREATE-INDEX-PROGRESS-REPORTING) with Postgres 12+
+
+```sql
+SELECT phase, round(100.0 * tuples_done / nullif(tuples_total, 0), 1) AS "%" FROM pg_stat_progress_create_index;
+```
+
+The phases for IVFFlat are:
+
+1. `initializing`
+2. `performing k-means`
+3. `assigning tuples`
+4. `loading tuples`
+
+Note: `%` is only populated during the `loading tuples` phase
+
+## Filtering
+
+There are a few ways to index nearest neighbor queries with a `WHERE` clause
+
+```sql
+SELECT * FROM items WHERE category_id = 123 ORDER BY embedding <-> '[3,1,2]' LIMIT 5;
+```
+
+Create an index on one [or more](https://www.postgresql.org/docs/current/indexes-multicolumn.html) of the `WHERE` columns for exact search
+
+```sql
+CREATE INDEX ON items (category_id);
+```
+
+Or a [partial index](https://www.postgresql.org/docs/current/indexes-partial.html) on the vector column for approximate search
+
+```sql
+CREATE INDEX ON items USING hnsw (embedding vector_l2_ops) WHERE (category_id = 123);
+```
+
+Use [partitioning](https://www.postgresql.org/docs/current/ddl-partitioning.html) for approximate search on many different values of the `WHERE` columns
+
+```sql
+CREATE TABLE items (embedding vector(3), category_id int) PARTITION BY LIST(category_id);
+```
+
+## Half-Precision Vectors
+
+*Added in 0.7.0*
+
+Use the `halfvec` type to store half-precision vectors
+
+```sql
+CREATE TABLE items (id bigserial PRIMARY KEY, embedding halfvec(3));
+```
+
+## Half-Precision Indexing
+
+*Added in 0.7.0*
+
+Index vectors at half precision for smaller indexes
+
+```sql
+CREATE INDEX ON items USING hnsw ((embedding::halfvec(3)) halfvec_l2_ops);
+```
+
+Get the nearest neighbors
+
+```sql
+SELECT * FROM items ORDER BY embedding::halfvec(3) <-> '[1,2,3]' LIMIT 5;
+```
+
+## Binary Vectors
+
+Use the `bit` type to store binary vectors ([example](https://github.com/pgvector/pgvector-python/blob/master/examples/imagehash/example.py))
+
+```sql
+CREATE TABLE items (id bigserial PRIMARY KEY, embedding bit(3));
+INSERT INTO items (embedding) VALUES ('000'), ('111');
+```
+
+Get the nearest neighbors by Hamming distance (added in 0.7.0)
+
+```sql
+SELECT * FROM items ORDER BY embedding <~> '101' LIMIT 5;
+```
+
+Or (before 0.7.0)
+
+```sql
+SELECT * FROM items ORDER BY bit_count(embedding # '101') LIMIT 5;
+```
+
+Also supports Jaccard distance (`<%>`)
+
+## Binary Quantization
+
+*Added in 0.7.0*
+
+Use expression indexing for binary quantization
+
+```sql
+CREATE INDEX ON items USING hnsw ((binary_quantize(embedding)::bit(3)) bit_hamming_ops);
+```
+
+Get the nearest neighbors by Hamming distance
+
+```sql
+SELECT * FROM items ORDER BY binary_quantize(embedding)::bit(3) <~> binary_quantize('[1,-2,3]') LIMIT 5;
+```
+
+Re-rank by the original vectors for better recall
+
+```sql
+SELECT * FROM (
+    SELECT * FROM items ORDER BY binary_quantize(embedding)::bit(3) <~> binary_quantize('[1,-2,3]') LIMIT 20
+) ORDER BY embedding <=> '[1,-2,3]' LIMIT 5;
+```
+
+## Sparse Vectors
+
+*Added in 0.7.0*
+
+Use the `sparsevec` type to store sparse vectors
+
+```sql
+CREATE TABLE items (id bigserial PRIMARY KEY, embedding sparsevec(5));
+```
+
+Insert vectors
+
+```sql
+INSERT INTO items (embedding) VALUES ('{1:1,3:2,5:3}/5'), ('{1:4,3:5,5:6}/5');
+```
+
+The format is `{index1:value1,index2:value2}/dimensions` and indices start at 1 like SQL arrays
+
+Get the nearest neighbors by L2 distance
+
+```sql
+SELECT * FROM items ORDER BY embedding <-> '{1:3,3:1,5:2}/5' LIMIT 5;
+```
+
+## Hybrid Search
+
+Use together with Postgres [full-text search](https://www.postgresql.org/docs/current/textsearch-intro.html) for hybrid search.
+
+```sql
+SELECT id, content FROM items, plainto_tsquery('hello search') query
+    WHERE textsearch @@ query ORDER BY ts_rank_cd(textsearch, query) DESC LIMIT 5;
+```
+
+You can use [Reciprocal Rank Fusion](https://github.com/pgvector/pgvector-python/blob/master/examples/hybrid_search/rrf.py) or a [cross-encoder](https://github.com/pgvector/pgvector-python/blob/master/examples/hybrid_search/cross_encoder.py) to combine results.
+
+## Indexing Subvectors
+
+*Added in 0.7.0*
+
+Use expression indexing to index subvectors
+
+```sql
+CREATE INDEX ON items USING hnsw ((subvector(embedding, 1, 3)::vector(3)) vector_cosine_ops);
+```
+
+Get the nearest neighbors by cosine distance
+
+```sql
+SELECT * FROM items ORDER BY subvector(embedding, 1, 3)::vector(3) <=> subvector('[1,2,3,4,5]'::vector, 1, 3) LIMIT 5;
+```
+
+Re-rank by the full vectors for better recall
+
+```sql
+SELECT * FROM (
+    SELECT * FROM items ORDER BY subvector(embedding, 1, 3)::vector(3) <=> subvector('[1,2,3,4,5]'::vector, 1, 3) LIMIT 20
+) ORDER BY embedding <=> '[1,2,3,4,5]' LIMIT 5;
+```
+
+## Performance
+
+### Tuning
+
+Use a tool like [PgTune](https://pgtune.leopard.in.ua/) to set initial values for Postgres server parameters. For instance, `shared_buffers` should typically be 25% of the server’s memory. You can find the config file with:
+
+```sql
+SHOW config_file;
+```
+
+And check individual settings with:
+
+```sql
+SHOW shared_buffers;
+```
+
+Be sure to restart Postgres for changes to take effect.
+
+### Loading
+
+Use `COPY` for bulk loading data ([example](https://github.com/pgvector/pgvector-python/blob/master/examples/loading/example.py)).
+
+```sql
+COPY items (embedding) FROM STDIN WITH (FORMAT BINARY);
+```
+
+Add any indexes *after* loading the initial data for best performance.
+
+### Indexing
+
+See index build time for [HNSW](#index-build-time) and [IVFFlat](#index-build-time-1).
+
+In production environments, create indexes concurrently to avoid blocking writes.
+
+```sql
+CREATE INDEX CONCURRENTLY ...
+```
+
+### Querying
+
+Use `EXPLAIN ANALYZE` to debug performance.
+
+```sql
+EXPLAIN ANALYZE SELECT * FROM items ORDER BY embedding <-> '[3,1,2]' LIMIT 5;
+```
+
+#### Exact Search
+
+To speed up queries without an index, increase `max_parallel_workers_per_gather`.
+
+```sql
+SET max_parallel_workers_per_gather = 4;
+```
+
+If vectors are normalized to length 1 (like [OpenAI embeddings](https://platform.openai.com/docs/guides/embeddings/which-distance-function-should-i-use)), use inner product for best performance.
+
+```tsql
+SELECT * FROM items ORDER BY embedding <#> '[3,1,2]' LIMIT 5;
+```
+
+#### Approximate Search
+
+To speed up queries with an IVFFlat index, increase the number of inverted lists (at the expense of recall).
+
+```sql
+CREATE INDEX ON items USING ivfflat (embedding vector_l2_ops) WITH (lists = 1000);
+```
+
+### Vacuuming
+
+Vacuuming can take a while for HNSW indexes. Speed it up by reindexing first.
+
+```sql
+REINDEX INDEX CONCURRENTLY index_name;
+VACUUM table_name;
+```
+
+## Monitoring
+
+Monitor performance with [pg_stat_statements](https://www.postgresql.org/docs/current/pgstatstatements.html) (be sure to add it to `shared_preload_libraries`).
+
+```sql
+CREATE EXTENSION pg_stat_statements;
+```
+
+Get the most time-consuming queries with:
+
+```sql
+SELECT query, calls, ROUND((total_plan_time + total_exec_time) / calls) AS avg_time_ms,
+    ROUND((total_plan_time + total_exec_time) / 60000) AS total_time_min
+    FROM pg_stat_statements ORDER BY total_plan_time + total_exec_time DESC LIMIT 20;
+```
+
+Note: Replace `total_plan_time + total_exec_time` with `total_time` for Postgres < 13
+
+Monitor recall by comparing results from approximate search with exact search.
+
+```sql
+BEGIN;
+SET LOCAL enable_indexscan = off; -- use exact search
+SELECT ...
+COMMIT;
+```
+
+## Scaling
+
+Scale pgvector the same way you scale Postgres.
+
+Scale vertically by increasing memory, CPU, and storage on a single instance. Use existing tools to [tune parameters](#tuning) and [monitor performance](#monitoring).
+
+Scale horizontally with [replicas](https://www.postgresql.org/docs/current/hot-standby.html), or use [Citus](https://github.com/citusdata/citus) or another approach for sharding ([example](https://github.com/pgvector/pgvector-python/blob/master/examples/citus/example.py)).
+
+## Languages
+
+Use pgvector from any language with a Postgres client. You can even generate and store vectors in one language and query them in another.
+
+Language | Libraries / Examples
+--- | ---
+C | [pgvector-c](https://github.com/pgvector/pgvector-c)
+C++ | [pgvector-cpp](https://github.com/pgvector/pgvector-cpp)
+C#, F#, Visual Basic | [pgvector-dotnet](https://github.com/pgvector/pgvector-dotnet)
+Crystal | [pgvector-crystal](https://github.com/pgvector/pgvector-crystal)
+Dart | [pgvector-dart](https://github.com/pgvector/pgvector-dart)
+Elixir | [pgvector-elixir](https://github.com/pgvector/pgvector-elixir)
+Go | [pgvector-go](https://github.com/pgvector/pgvector-go)
+Haskell | [pgvector-haskell](https://github.com/pgvector/pgvector-haskell)
+Java, Kotlin, Groovy, Scala | [pgvector-java](https://github.com/pgvector/pgvector-java)
+JavaScript, TypeScript | [pgvector-node](https://github.com/pgvector/pgvector-node)
+Julia | [pgvector-julia](https://github.com/pgvector/pgvector-julia)
+Lisp | [pgvector-lisp](https://github.com/pgvector/pgvector-lisp)
+Lua | [pgvector-lua](https://github.com/pgvector/pgvector-lua)
+Nim | [pgvector-nim](https://github.com/pgvector/pgvector-nim)
+OCaml | [pgvector-ocaml](https://github.com/pgvector/pgvector-ocaml)
+Perl | [pgvector-perl](https://github.com/pgvector/pgvector-perl)
+PHP | [pgvector-php](https://github.com/pgvector/pgvector-php)
+Python | [pgvector-python](https://github.com/pgvector/pgvector-python)
+R | [pgvector-r](https://github.com/pgvector/pgvector-r)
+Ruby | [pgvector-ruby](https://github.com/pgvector/pgvector-ruby), [Neighbor](https://github.com/ankane/neighbor)
+Rust | [pgvector-rust](https://github.com/pgvector/pgvector-rust)
+Swift | [pgvector-swift](https://github.com/pgvector/pgvector-swift)
+Zig | [pgvector-zig](https://github.com/pgvector/pgvector-zig)
+
+## Frequently Asked Questions
+
+#### How many vectors can be stored in a single table?
+
+A non-partitioned table has a limit of 32 TB by default in Postgres. A partitioned table can have thousands of partitions of that size.
+
+#### Is replication supported?
+
+Yes, pgvector uses the write-ahead log (WAL), which allows for replication and point-in-time recovery.
+
+#### What if I want to index vectors with more than 2,000 dimensions?
+
+You can use [half-precision indexing](#half-precision-indexing) to index up to 4,000 dimensions or [binary quantization](#binary-quantization) to index up to 64,000 dimensions. Another option is [dimensionality reduction](https://en.wikipedia.org/wiki/Dimensionality_reduction).
+
+#### Can I store vectors with different dimensions in the same column?
+
+You can use `vector` as the type (instead of `vector(3)`).
+
+```sql
+CREATE TABLE embeddings (model_id bigint, item_id bigint, embedding vector, PRIMARY KEY (model_id, item_id));
+```
+
+However, you can only create indexes on rows with the same number of dimensions (using [expression](https://www.postgresql.org/docs/current/indexes-expressional.html) and [partial](https://www.postgresql.org/docs/current/indexes-partial.html) indexing):
+
+```sql
+CREATE INDEX ON embeddings USING hnsw ((embedding::vector(3)) vector_l2_ops) WHERE (model_id = 123);
+```
+
+and query with:
+
+```sql
+SELECT * FROM embeddings WHERE model_id = 123 ORDER BY embedding::vector(3) <-> '[3,1,2]' LIMIT 5;
+```
+
+#### Can I store vectors with more precision?
+
+You can use the `double precision[]` or `numeric[]` type to store vectors with more precision.
+
+```sql
+CREATE TABLE items (id bigserial PRIMARY KEY, embedding double precision[]);
+
+-- use {} instead of [] for Postgres arrays
+INSERT INTO items (embedding) VALUES ('{1,2,3}'), ('{4,5,6}');
+```
+
+Optionally, add a [check constraint](https://www.postgresql.org/docs/current/ddl-constraints.html) to ensure data can be converted to the `vector` type and has the expected dimensions.
+
+```sql
+ALTER TABLE items ADD CHECK (vector_dims(embedding::vector) = 3);
+```
+
+Use [expression indexing](https://www.postgresql.org/docs/current/indexes-expressional.html) to index (at a lower precision):
+
+```sql
+CREATE INDEX ON items USING hnsw ((embedding::vector(3)) vector_l2_ops);
+```
+
+and query with:
+
+```sql
+SELECT * FROM items ORDER BY embedding::vector(3) <-> '[3,1,2]' LIMIT 5;
+```
+
+#### Do indexes need to fit into memory?
+
+No, but like other index types, you’ll likely see better performance if they do. You can get the size of an index with:
+
+```sql
+SELECT pg_size_pretty(pg_relation_size('index_name'));
+```
+
+## Troubleshooting
+
+#### Why isn’t a query using an index?
+
+The query needs to have an `ORDER BY` and `LIMIT`, and the `ORDER BY` must be the result of a distance operator (not an expression) in ascending order.
+
+```sql
+-- index
+ORDER BY embedding <=> '[3,1,2]' LIMIT 5;
+
+-- no index
+ORDER BY 1 - (embedding <=> '[3,1,2]') DESC LIMIT 5;
+```
+
+You can encourage the planner to use an index for a query with:
+
+```sql
+BEGIN;
+SET LOCAL enable_seqscan = off;
+SELECT ...
+COMMIT;
+```
+
+Also, if the table is small, a table scan may be faster.
+
+#### Why isn’t a query using a parallel table scan?
+
+The planner doesn’t consider [out-of-line storage](https://www.postgresql.org/docs/current/storage-toast.html) in cost estimates, which can make a serial scan look cheaper. You can reduce the cost of a parallel scan for a query with:
+
+```sql
+BEGIN;
+SET LOCAL min_parallel_table_scan_size = 1;
+SET LOCAL parallel_setup_cost = 1;
+SELECT ...
+COMMIT;
+```
+
+or choose to store vectors inline:
+
+```sql
+ALTER TABLE items ALTER COLUMN embedding SET STORAGE PLAIN;
+```
+
+#### Why are there less results for a query after adding an HNSW index?
+
+Results are limited by the size of the dynamic candidate list (`hnsw.ef_search`). There may be even less results due to dead tuples or filtering conditions in the query. We recommend setting `hnsw.ef_search` to at least twice the `LIMIT` of the query. If you need more than 500 results, use an IVFFlat index instead.
+
+Also, note that `NULL` vectors are not indexed (as well as zero vectors for cosine distance).
+
+#### Why are there less results for a query after adding an IVFFlat index?
+
+The index was likely created with too little data for the number of lists. Drop the index until the table has more data.
+
+```sql
+DROP INDEX index_name;
+```
+
+Results can also be limited by the number of probes (`ivfflat.probes`).
+
+Also, note that `NULL` vectors are not indexed (as well as zero vectors for cosine distance).
+
+## Reference
+
+- [Vector](#vector-type)
+- [Halfvec](#halfvec-type)
+- [Bit](#bit-type)
+- [Sparsevec](#sparsevec-type)
+
+### Vector Type
+
+Each vector takes `4 * dimensions + 8` bytes of storage. Each element is a single-precision floating-point number (like the `real` type in Postgres), and all elements must be finite (no `NaN`, `Infinity` or `-Infinity`). Vectors can have up to 16,000 dimensions.
+
+### Vector Operators
+
+Operator | Description | Added
+--- | --- | ---
+\+ | element-wise addition |
+\- | element-wise subtraction |
+\* | element-wise multiplication | 0.5.0
+\|\| | concatenate | 0.7.0
+<-> | Euclidean distance |
+<#> | negative inner product |
+<=> | cosine distance |
+<+> | taxicab distance | 0.7.0
+
+### Vector Functions
+
+Function | Description | Added
+--- | --- | ---
+binary_quantize(vector) → bit | binary quantize | 0.7.0
+cosine_distance(vector, vector) → double precision | cosine distance |
+inner_product(vector, vector) → double precision | inner product |
+l1_distance(vector, vector) → double precision | taxicab distance | 0.5.0
+l2_distance(vector, vector) → double precision | Euclidean distance |
+l2_normalize(vector) → vector | Normalize with Euclidean norm | 0.7.0
+subvector(vector, integer, integer) → vector | subvector | 0.7.0
+vector_dims(vector) → integer | number of dimensions |
+vector_norm(vector) → double precision | Euclidean norm |
+
+### Vector Aggregate Functions
+
+Function | Description | Added
+--- | --- | ---
+avg(vector) → vector | average |
+sum(vector) → vector | sum | 0.5.0
+
+### Halfvec Type
+
+Each half vector takes `2 * dimensions + 8` bytes of storage. Each element is a half-precision floating-point number, and all elements must be finite (no `NaN`, `Infinity` or `-Infinity`). Half vectors can have up to 16,000 dimensions.
+
+### Halfvec Operators
+
+Operator | Description | Added
+--- | --- | ---
+\+ | element-wise addition | 0.7.0
+\- | element-wise subtraction | 0.7.0
+\* | element-wise multiplication | 0.7.0
+\|\| | concatenate | 0.7.0
+<-> | Euclidean distance | 0.7.0
+<#> | negative inner product | 0.7.0
+<=> | cosine distance | 0.7.0
+<+> | taxicab distance | 0.7.0
+
+### Halfvec Functions
+
+Function | Description | Added
+--- | --- | ---
+binary_quantize(halfvec) → bit | binary quantize | 0.7.0
+cosine_distance(halfvec, halfvec) → double precision | cosine distance | 0.7.0
+inner_product(halfvec, halfvec) → double precision | inner product | 0.7.0
+l1_distance(halfvec, halfvec) → double precision | taxicab distance | 0.7.0
+l2_distance(halfvec, halfvec) → double precision | Euclidean distance | 0.7.0
+l2_norm(halfvec) → double precision | Euclidean norm | 0.7.0
+l2_normalize(halfvec) → halfvec | Normalize with Euclidean norm | 0.7.0
+subvector(halfvec, integer, integer) → halfvec | subvector | 0.7.0
+vector_dims(halfvec) → integer | number of dimensions | 0.7.0
+
+### Halfvec Aggregate Functions
+
+Function | Description | Added
+--- | --- | ---
+avg(halfvec) → halfvec | average | 0.7.0
+sum(halfvec) → halfvec | sum | 0.7.0
+
+### Bit Type
+
+Each bit vector takes `dimensions / 8 + 8` bytes of storage. See the [Postgres docs](https://www.postgresql.org/docs/current/datatype-bit.html) for more info.
+
+### Bit Operators
+
+Operator | Description | Added
+--- | --- | ---
+<~> | Hamming distance | 0.7.0
+<%> | Jaccard distance | 0.7.0
+
+### Bit Functions
+
+Function | Description | Added
+--- | --- | ---
+hamming_distance(bit, bit) → double precision | Hamming distance | 0.7.0
+jaccard_distance(bit, bit) → double precision | Jaccard distance | 0.7.0
+
+### Sparsevec Type
+
+Each sparse vector takes `8 * non-zero elements + 16` bytes of storage. Each element is a single-precision floating-point number, and all elements must be finite (no `NaN`, `Infinity` or `-Infinity`). Sparse vectors can have up to 16,000 non-zero elements.
+
+### Sparsevec Operators
+
+Operator | Description | Added
+--- | --- | ---
+<-> | Euclidean distance | 0.7.0
+<#> | negative inner product | 0.7.0
+<=> | cosine distance | 0.7.0
+<+> | taxicab distance | 0.7.0
+
+### Sparsevec Functions
+
+Function | Description | Added
+--- | --- | ---
+cosine_distance(sparsevec, sparsevec) → double precision | cosine distance | 0.7.0
+inner_product(sparsevec, sparsevec) → double precision | inner product | 0.7.0
+l1_distance(sparsevec, sparsevec) → double precision | taxicab distance | 0.7.0
+l2_distance(sparsevec, sparsevec) → double precision | Euclidean distance | 0.7.0
+l2_norm(sparsevec) → double precision | Euclidean norm | 0.7.0
+l2_normalize(sparsevec) → sparsevec | Normalize with Euclidean norm | 0.7.0
+
+## Installation Notes - Linux and Mac
+
+### Postgres Location
+
+If your machine has multiple Postgres installations, specify the path to [pg_config](https://www.postgresql.org/docs/current/app-pgconfig.html) with:
+
+```sh
+export PG_CONFIG=/Library/PostgreSQL/17/bin/pg_config
+```
+
+Then re-run the installation instructions (run `make clean` before `make` if needed). If `sudo` is needed for `make install`, use:
+
+```sh
+sudo --preserve-env=PG_CONFIG make install
+```
+
+A few common paths on Mac are:
+
+- EDB installer - `/Library/PostgreSQL/17/bin/pg_config`
+- Homebrew (arm64) - `/opt/homebrew/opt/postgresql@17/bin/pg_config`
+- Homebrew (x86-64) - `/usr/local/opt/postgresql@17/bin/pg_config`
+
+Note: Replace `17` with your Postgres server version
+
+### Missing Header
+
+If compilation fails with `fatal error: postgres.h: No such file or directory`, make sure Postgres development files are installed on the server.
+
+For Ubuntu and Debian, use:
+
+```sh
+sudo apt install postgresql-server-dev-17
+```
+
+Note: Replace `17` with your Postgres server version
+
+### Missing SDK
+
+If compilation fails and the output includes `warning: no such sysroot directory` on Mac, reinstall Xcode Command Line Tools.
+
+### Portability
+
+By default, pgvector compiles with `-march=native` on some platforms for best performance. However, this can lead to `Illegal instruction` errors if trying to run the compiled extension on a different machine.
+
+To compile for portability, use:
+
+```sh
+make OPTFLAGS=""
+```
+
+## Installation Notes - Windows
+
+### Missing Header
+
+If compilation fails with `Cannot open include file: 'postgres.h': No such file or directory`, make sure `PGROOT` is correct.
+
+### Permissions
+
+If installation fails with `Access is denied`, re-run the installation instructions as an administrator.
+
+## Additional Installation Methods
+
+### Docker
+
+Get the [Docker image](https://hub.docker.com/r/pgvector/pgvector) with:
+
+```sh
+docker pull pgvector/pgvector:pg17
+```
+
+This adds pgvector to the [Postgres image](https://hub.docker.com/_/postgres) (replace `17` with your Postgres server version, and run it the same way).
+
+You can also build the image manually:
+
+```sh
+git clone --branch v0.7.4 https://github.com/pgvector/pgvector.git
+cd pgvector
+docker build --pull --build-arg PG_MAJOR=17 -t myuser/pgvector .
+```
+
+### Homebrew
+
+With Homebrew Postgres, you can use:
+
+```sh
+brew install pgvector
+```
+
+Note: This only adds it to the `postgresql@17` and `postgresql@14` formulas
+
+### PGXN
+
+Install from the [PostgreSQL Extension Network](https://pgxn.org/dist/vector) with:
+
+```sh
+pgxn install vector
+```
+
+### APT
+
+Debian and Ubuntu packages are available from the [PostgreSQL APT Repository](https://wiki.postgresql.org/wiki/Apt). Follow the [setup instructions](https://wiki.postgresql.org/wiki/Apt#Quickstart) and run:
+
+```sh
+sudo apt install postgresql-17-pgvector
+```
+
+Note: Replace `17` with your Postgres server version
+
+### Yum
+
+RPM packages are available from the [PostgreSQL Yum Repository](https://yum.postgresql.org/). Follow the [setup instructions](https://www.postgresql.org/download/linux/redhat/) for your distribution and run:
+
+```sh
+sudo yum install pgvector_17
+# or
+sudo dnf install pgvector_17
+```
+
+Note: Replace `17` with your Postgres server version
+
+### pkg
+
+Install the FreeBSD package with:
+
+```sh
+pkg install postgresql15-pgvector
+```
+
+or the port with:
+
+```sh
+cd /usr/ports/databases/pgvector
+make install
+```
+
+### conda-forge
+
+With Conda Postgres, install from [conda-forge](https://anaconda.org/conda-forge/pgvector) with:
+
+```sh
+conda install -c conda-forge pgvector
+```
+
+This method is [community-maintained](https://github.com/conda-forge/pgvector-feedstock) by [@mmcauliffe](https://github.com/mmcauliffe)
+
+### Postgres.app
+
+Download the [latest release](https://postgresapp.com/downloads.html) with Postgres 15+.
+
+## Hosted Postgres
+
+pgvector is available on [these providers](https://github.com/pgvector/pgvector/issues/54).
+
+## Upgrading
+
+[Install](#installation) the latest version (use the same method as the original installation). Then in each database you want to upgrade, run:
+
+```sql
+ALTER EXTENSION vector UPDATE;
+```
+
+You can check the version in the current database with:
+
+```sql
+SELECT extversion FROM pg_extension WHERE extname = 'vector';
+```
+
+## Upgrade Notes
+
+### 0.6.0
+
+#### Postgres 12
+
+If upgrading with Postgres 12, remove this line from `sql/vector--0.5.1--0.6.0.sql`:
+
+```sql
+ALTER TYPE vector SET (STORAGE = external);
+```
+
+Then run `make install` and `ALTER EXTENSION vector UPDATE;`.
+
+#### Docker
+
+The Docker image is now published in the `pgvector` org, and there are tags for each supported version of Postgres (rather than a `latest` tag).
+
+```sh
+docker pull pgvector/pgvector:pg16
+# or
+docker pull pgvector/pgvector:0.6.0-pg16
+```
+
+Also, if you’ve increased `maintenance_work_mem`, make sure `--shm-size` is at least that size to avoid an error with parallel HNSW index builds.
+
+```sh
+docker run --shm-size=1g ...
+```
+
+## Thanks
+
+Thanks to:
+
+- [PASE: PostgreSQL Ultra-High-Dimensional Approximate Nearest Neighbor Search Extension](https://dl.acm.org/doi/pdf/10.1145/3318464.3386131)
+- [Faiss: A Library for Efficient Similarity Search and Clustering of Dense Vectors](https://github.com/facebookresearch/faiss)
+- [Using the Triangle Inequality to Accelerate k-means](https://cdn.aaai.org/ICML/2003/ICML03-022.pdf)
+- [k-means++: The Advantage of Careful Seeding](https://theory.stanford.edu/~sergei/papers/kMeansPP-soda.pdf)
+- [Concept Decompositions for Large Sparse Text Data using Clustering](https://www.cs.utexas.edu/users/inderjit/public_papers/concept_mlj.pdf)
+- [Efficient and Robust Approximate Nearest Neighbor Search using Hierarchical Navigable Small World Graphs](https://arxiv.org/ftp/arxiv/papers/1603/1603.09320.pdf)
+
+## History
+
+View the [changelog](https://github.com/pgvector/pgvector/blob/master/CHANGELOG.md)
+
+## Contributing
+
+Everyone is encouraged to help improve this project. Here are a few ways you can help:
+
+- [Report bugs](https://github.com/pgvector/pgvector/issues)
+- Fix bugs and [submit pull requests](https://github.com/pgvector/pgvector/pulls)
+- Write, clarify, or fix documentation
+- Suggest or add new features
+
+To get started with development:
+
+```sh
+git clone https://github.com/pgvector/pgvector.git
+cd pgvector
+make
+make install
+```
+
+To run all tests:
+
+```sh
+make installcheck        # regression tests
+make prove_installcheck  # TAP tests
+```
+
+To run single tests:
+
+```sh
+make installcheck REGRESS=functions                            # regression test
+make prove_installcheck PROVE_TESTS=test/t/001_ivfflat_wal.pl  # TAP test
+```
+
+To enable assertions:
+
+```sh
+make clean && PG_CFLAGS="-DUSE_ASSERT_CHECKING" make && make install
+```
+
+To enable benchmarking:
+
+```sh
+make clean && PG_CFLAGS="-DIVFFLAT_BENCH" make && make install
+```
+
+To show memory usage:
+
+```sh
+make clean && PG_CFLAGS="-DHNSW_MEMORY -DIVFFLAT_MEMORY" make && make install
+```
+
+To get k-means metrics:
+
+```sh
+make clean && PG_CFLAGS="-DIVFFLAT_KMEANS_DEBUG" make && make install
+```
+
+Resources for contributors
+
+- [Extension Building Infrastructure](https://www.postgresql.org/docs/current/extend-pgxs.html)
+- [Index Access Method Interface Definition](https://www.postgresql.org/docs/current/indexam.html)
+- [Generic WAL Records](https://www.postgresql.org/docs/current/generic-wal.html)
+
+
+<p></p>
+<div align=center>
+
+# pgvectorscale
+
+<h3>pgvectorscale builds on pgvector with higher performance embedding search and cost-efficient storage for AI applications. </h3>
+
+[![Discord](https://img.shields.io/badge/Join_us_on_Discord-black?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/KRdHVXAmkp)
+[![Try Timescale for free](https://img.shields.io/badge/Try_Timescale_for_free-black?style=for-the-badge&logo=timescale&logoColor=white)](https://tsdb.co/gh-pgvector-signup)
+</div>
+
+pgvectorscale complements [pgvector][pgvector], the open-source vector data extension for PostgreSQL, and introduces the following key innovations for pgvector data:
+- A new index type called StreamingDiskANN, inspired by the [DiskANN](https://github.com/microsoft/DiskANN) algorithm, based on research from Microsoft.
+- Statistical Binary Quantization: developed by Timescale researchers, This compression method improves on standard Binary Quantization.
+
+On a benchmark dataset of 50 million Cohere embeddings with 768 dimensions
+each, PostgreSQL with `pgvector` and `pgvectorscale` achieves **28x lower p95
+latency** and **16x higher query throughput** compared to Pinecone's storage
+optimized (s1) index for approximate nearest neighbor queries at 99% recall,
+all at 75% less cost when self-hosted on AWS EC2.
+
+<div align=center>
+
+![Benchmarks](https://assets.timescale.com/docs/images/benchmark-comparison-pgvectorscale-pinecone.png)
+
+</div>
+
+To learn more about the performance impact of pgvectorscale, and details about benchmark methodology and results, see the [pgvector vs Pinecone comparison blog post](http://www.timescale.com/blog/pgvector-vs-pinecone).
+
+In contrast to pgvector, which is written in C, pgvectorscale is developed in [Rust][rust-language] using the [PGRX framework](https://github.com/pgcentralfoundation/pgrx),
+offering the PostgreSQL community a new avenue for contributing to vector support.
+
+**Application developers or DBAs** can use pgvectorscale with their PostgreSQL databases.
+   * [Install pgvectorscale](#installation)
+   * [Get started using pgvectorscale](#get-started-with-pgvectorscale)
+
+If you **want to contribute** to this extension, see how to [build pgvectorscale from source in a developer environment](./DEVELOPMENT.md).
+
+For production vector workloads, get **private beta access to vector-optimized databases** with pgvector and pgvectorscale on Timescale. [Sign up here for priority access](https://timescale.typeform.com/to/H7lQ10eQ).
+
+## Installation
+
+The fastest ways to run PostgreSQL with pgvectorscale are:
+
+* [Using a pre-built Docker container](#using-a-pre-built-docker-container)
+* [Installing from source](#installing-from-source)
+* [Enable pgvectorscale in a Timescale Cloud service](#enable-pgai-in-a-timescale-cloud-service)
+
+### Using a pre-built Docker container
+
+1.  [Run the TimescaleDB Docker image](https://docs.timescale.com/self-hosted/latest/install/installation-docker/).
+
+1. Connect to your database:
+   ```bash
+   psql -d "postgres://<username>:<password>@<host>:<port>/<database-name>"
+   ```
+
+1. Create the pgvectorscale extension:
+
+    ```sql
+    CREATE EXTENSION IF NOT EXISTS vectorscale CASCADE;
+    ```
+
+   The `CASCADE` automatically installs `pgvector`.
+
+### Installing from source
+
+You can install pgvectorscale from source and install it in an existing PostgreSQL server
+
+1. Compile and install the extension
+
+    ```bash
+    # install prerequisites
+    ## rust
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    ## pgrx
+    cargo install --locked cargo-pgrx
+    cargo pgrx init --pg16 pg_config
+
+    #download, build and install pgvectorscale
+    cd /tmp
+    git clone --branch <version> https://github.com/timescale/pgvectorscale
+    cd pgvectorscale/pgvectorscale
+    cargo pgrx install --release
+    ```
+
+    You can also take a look at our [documentation for extension developers](./DEVELOPMENT.md) for more complete instructions.
+
+1. Connect to your database:
+   ```bash
+   psql -d "postgres://<username>:<password>@<host>:<port>/<database-name>"
+   ```
+
+1. Ensure the pgvector extension is available:
+
+   ```sql
+   SELECT * FROM pg_available_extensions WHERE name = 'vector';
+   ```
+
+   If pgvector is not available, install it using the [pgvector installation
+   instructions][pgvector-install].
+
+
+1. Create the pgvectorscale extension:
+
+    ```sql
+    CREATE EXTENSION IF NOT EXISTS vectorscale CASCADE;
+    ```
+
+   The `CASCADE` automatically installs `pgvector`.
+
+### Enable pgvectorscale in a Timescale Cloud service
+
+Note: the instructions below are for Timescale's standard compute instance. For production vector workloads, we’re offering **private beta access to vector-optimized databases** with pgvector and pgvectorscale on Timescale. [Sign up here for priority access](https://timescale.typeform.com/to/H7lQ10eQ).
+
+To enable pgvectorscale:
+
+1. Create a new [Timescale Service](https://console.cloud.timescale.com/signup?utm_campaign=vectorlaunch).
+
+   If you want to use an existing service, pgvectorscale is added as an available extension on the first maintenance window
+   after the pgvectorscale release date.
+
+1. Connect to your Timescale service:
+   ```bash
+   psql -d "postgres://<username>:<password>@<host>:<port>/<database-name>"
+   ```
+
+1. Create the pgvectorscale extension:
+
+    ```postgresql
+    CREATE EXTENSION IF NOT EXISTS vectorscale CASCADE;
+    ```
+
+   The `CASCADE` automatically installs `pgvector`.
+
+
+## Get started with pgvectorscale
+
+
+1. Create a table with an embedding column. For example:
+
+    ```postgresql
+    CREATE TABLE IF NOT EXISTS document_embedding  (
+        id BIGINT PRIMARY KEY GENERATED BY DEFAULT AS IDENTITY,
+        metadata JSONB,
+        contents TEXT,
+        embedding VECTOR(1536)
+    )
+    ```
+
+1. Populate the table.
+
+   For more information, see the [pgvector instructions](https://github.com/pgvector/pgvector/blob/master/README.md#storing) and [list of clients](https://github.com/pgvector/pgvector/blob/master/README.md#languages).
+1. Create a StreamingDiskANN index on the embedding column:
+    ```postgresql
+    CREATE INDEX document_embedding_idx ON document_embedding
+    USING diskann (embedding);
+    ```
+1. Find the 10 closest embeddings using the index.
+
+    ```postgresql
+    SELECT *
+    FROM document_embedding
+    ORDER BY embedding <=> $1
+    LIMIT 10
+    ```
+
+    Note: pgvectorscale currently support cosine distance (`<=>`) queries. If you would like additional distance types,
+    [create an issue](https://github.com/timescale/pgvectorscale/issues).
+
+## Tuning
+
+The StreamingDiskANN index comes with **smart defaults** but also the ability to customize it's behavior. There are two types of parameters: index build-time parameters that are specified when an index is created and query-time parameters that can be tuned when querying an index.
+
+We suggest setting the index build-time paramers for major changes to index operations while query-time parameters can be used to tune the accuracy/performance tradeoff for individual queries.
+
+ We expect most people to tune the query-time parameters (if any) and leave the index build time parameters set to default.
+
+### StreamingDiskANN index build-time parameters
+
+These parameters can be set when an index is created.
+
+| Parameter name   | Description                                                                                                                                                    | Default value |
+|------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------|
+| `storage_layout` | `memory_optimized` which uses SBQ to compress vector data or `plain` which stores data uncompressed | memory_optimized
+| `num_neighbors`    | Sets the maximum number of neighbors per node. Higher values increase accuracy but make the graph traversal slower.                                           | 50            |
+| `search_list_size` | This is the S parameter used in the greedy search algorithm used during construction. Higher values improve graph quality at the cost of slower index builds. | 100           |
+| `max_alpha`        | Is the alpha parameter in the algorithm. Higher values improve graph quality at the cost of slower index builds.                                              | 1.2           |
+| `num_dimensions` | The number of dimensions to index. By default, all dimensions are indexed. But you can also index less dimensions to make use of [Matryoshka embeddings](https://huggingface.co/blog/matryoshka) | 0 (all dimensions)
+| `num_bits_per_dimension` | Number of bits used to encode each dimension when using SBQ | 2 for less than 900 dimensions, 1 otherwise
+
+An example of how to set the `num_neighbors` parameter is:
+
+```sql
+CREATE INDEX document_embedding_idx ON document_embedding
+USING diskann (embedding) WITH(num_neighbors=50);
+```
+
+#### StreamingDiskANN query-time parameters
+
+You can also set two parameters to control the accuracy vs. query speed trade-off at query time. We suggest adjusting `diskann.query_rescore` to fine-tune accuracy.
+
+| Parameter name   | Description                                                                                                                                                    | Default value |
+|------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------|
+| `diskann.query_search_list_size` | The number of additional candidates considered during the graph search. | 100
+| `diskann.query_rescore` | The number of elements rescored (0 to disable rescoring) | 50
+
+
+You can set the value by using `SET` before executing a query. For example:
+
+```sql
+SET diskann.query_rescore = 400;
+```
+
+Note the [SET command](https://www.postgresql.org/docs/current/sql-set.html) applies to the entire session (database connection) from the point of execution. You can use a transaction-local variant using `LOCAL` which will
+be reset after the end of the transaction:
+
+```sql
+BEGIN;
+SET LOCAL diskann.query_search_list_size= 10;
+SELECT * FROM document_embedding ORDER BY embedding <=> $1 LIMIT 10
+COMMIT;
+```
+
+## Get involved
+
+pgvectorscale is still at an early stage. Now is a great time to help shape the
+direction of this project; we are currently deciding priorities. Have a look at the
+list of features we're thinking of working on. Feel free to comment, expand
+the list, or hop on the Discussions forum.
+
+## About Timescale
+
+Timescale is a PostgreSQL cloud company. To learn more visit the [timescale.com](https://www.timescale.com).
+
+[Timescale Cloud](https://console.cloud.timescale.com/signup?utm_campaign=vectorlaunch) is a high-performance, developer focused, cloud platform that provides PostgreSQL services for the most demanding AI, time-series, analytics, and event workloads. Timescale Cloud is ideal for production applications and provides high availability, streaming backups, upgrades over time, roles and permissions, and great security.
+
+
+[pgvector]: https://github.com/pgvector/pgvector/blob/master/README.md
+[rust-language]: https://www.rust-lang.org/
+[pgvector-install]: https://github.com/pgvector/pgvector?tab=readme-ov-file#installation
+
+
+<p></p>
+<div align=center>
+
+# pgai
+
+<h3>pgai brings AI workflows to your PostgreSQL database</h3>
+
+[![Discord](https://img.shields.io/badge/Join_us_on_Discord-black?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/KRdHVXAmkp)
+[![Try Timescale for free](https://img.shields.io/badge/Try_Timescale_for_free-black?style=for-the-badge&logo=timescale&logoColor=white)](https://tsdb.co/gh-pgai-signup)
+</div>
+
+pgai simplifies the process of building [search](https://en.wikipedia.org/wiki/Similarity_search), and
+[Retrieval Augmented Generation](https://en.wikipedia.org/wiki/Prompt_engineering#Retrieval-augmented_generation) (RAG) AI applications with PostgreSQL.
+
+pgai brings embedding and generation AI models closer to the database. With pgai, you can now do the following directly from within PostgreSQL in a SQL query:
+
+* Create vector [embeddings](#embed) for your data.
+* Retrieve LLM [chat completions](#chat-complete) from models like Claude Sonnet 3.5, OpenAI GPT4o, Cohere Command, and Llama 3 (via Ollama).
+* Reason over your data and facilitate use cases like [classification, summarization, and data enrichment](docs/advanced.md) on your existing relational data in PostgreSQL.
+
+Here's how to get started with pgai:
+
+* **Everyone**: Use pgai in your PostgreSQL database.
+  1. [Install pgai](#installation).
+  1. Use pgai to integrate AI from your provider:
+    * [Ollama](./docs/ollama.md) - configure pgai for Ollama, then use the model to embed, chat complete and generate.
+    * [OpenAI](./docs/openai.md) - configure pgai for OpenAI, then use the model to tokenize, embed, chat complete and moderate. This page also includes advanced examples.
+    * [Anthropic](./docs/anthropic.md) - configure pgai for Anthropic, then use the model to generate content.
+    * [Cohere](./docs/cohere.md) - configure pgai for Cohere, then use the model to tokenize, embed, chat complete, classify, and rerank.
+* **Extension contributor**: Contribute to pgai and improve the project.
+  * [Develop and test changes to the pgai extension](./DEVELOPMENT.md).
+  * See the [Issues tab](https://github.com/timescale/pgai/issues) for a list of feature ideas to contribute.
+
+**Learn more about pgai:** To learn more about the pgai extension and why we built it, read this blog post [pgai: Giving PostgreSQL Developers AI Engineering Superpowers](http://www.timescale.com/blog/pgai-giving-postgresql-developers-ai-engineering-superpowers).
+
+## Installation
+
+The fastest ways to run PostgreSQL with the pgai extension are to:
+
+1. Create your database environment. Either:
+   * [Use a pre-built Docker container](#use-a-pre-built-docker-container).
+   * [Use a Timescale Cloud service](#use-a-timescale-cloud-service).
+   * [Install from source](#install-from-source).
+
+2. [Enable the pgai extension](#enable-the-pgai-extension-in-your-database).
+
+3. [Use pgai](#use-pgai).
+
+### Use a pre-built Docker container
+
+[Run the TimescaleDB Docker image](https://docs.timescale.com/self-hosted/latest/install/installation-docker/), then
+[enable the pgai extension](#enable-the-pgai-extension-in-your-database).
+
+### Use a Timescale Cloud service
+
+pgai is available for [new][create-a-new-service] or existing Timescale Cloud services. For any service,
+[enable the pgai extension](#enable-the-pgai-extension-in-your-database).
+
+
+### Install from source
+
+To install pgai from source on a PostgreSQL server:
+
+1. **Install the prerequisite software system-wide**
+   - **Python3**: if running `python3 --version` in Terminal returns `command
+     not found`, download and install the latest version of [Python3][python3].
+
+   - **Pip**: if running `pip --version` in Terminal returns `command not found`:
+     - **Standard installation**: use one of the pip [supported methods][pip].
+     - **Virtual environment**: usually, pip is automatically installed if you are working in a
+       [Python virtual environment][python-virtual-environment]. If you are running PostgreSQL in a virtual
+       environment, pgai requires several python packages. Set the `PYTHONPATH` and `VIRTUAL_ENV`
+       environment variables before you start your PostgreSQL server.
+
+       ```bash
+       PYTHONPATH=/path/to/venv/lib/python3.12/site-packages \
+       VIRTUAL_ENV=/path/to/venv \
+       pg_ctl -D /path/to/data -l logfile start
+       ```
+   - **PL/Python**: follow [How to install Postgres 16 with plpython3u: Recipes for macOS, Ubuntu, Debian, CentOS, Docker][pgai-plpython].
+
+      _macOS_: the standard PostgreSQL brew in Homebrew does not include the `plpython3` extension. These instructions show
+      how to install from an alternate tap.
+
+     - **[Postgresql plugin][asdf-postgres] for the [asdf][asdf] version manager**: set the `--with-python` option
+       when installing PostgreSQL:
+
+       ```bash
+       POSTGRES_EXTRA_CONFIGURE_OPTIONS=--with-python asdf install postgres 16.3
+       ```
+
+   - **pgvector**: follow the [install instructions][pgvector-install] from the official repository.
+
+   These extensions are automatically added to your PostgreSQL database when you
+   [Enable the pgai extension](#enable-the-pgai-extension-in-your-database).
+
+1. Make this `pgai` extension:
+
+    ```bash
+    make install
+    ```
+1. [Enable the pgai extension](#enable-the-pgai-extension-in-your-database).
+
+### Enable the pgai extension in your database
+
+1. Connect to your database with a postgres client like [psql v16](https://docs.timescale.com/use-timescale/latest/integrations/query-admin/psql/)
+   or [PopSQL](https://docs.timescale.com/use-timescale/latest/popsql/).
+   ```bash
+   psql -d "postgres://<username>:<password>@<host>:<port>/<database-name>"
+   ```
+
+3. Create the pgai extension:
+
+    ```sql
+    CREATE EXTENSION IF NOT EXISTS ai CASCADE;
+    ```
+
+   The `CASCADE` automatically installs `pgvector` and `plpython3u` extensions.
+
+### Use pgai
+
+Now, use pgai to integrate AI from [Ollama](./docs/ollama.md) and [OpenAI](./docs/openai.md).
+Learn how to [moderate](./docs/moderate.md) and [embed](./docs/delayed_embed.md)
+content directly in the database using triggers and background jobs.
+
+## Get involved
+
+pgai is still at an early stage. Now is a great time to help shape the direction of this project;
+we are currently deciding priorities. Have a look at the [list of features](https://github.com/timescale/pgai/issues) we're thinking of working on.
+Feel free to comment, expand the list, or hop on the Discussions forum.
+
+To get started, take a look at [how to contribute](./CONTRIBUTING.md)
+and [how to set up a dev/test environment](./DEVELOPMENT.md).
+
+## About Timescale
+
+Timescale is a PostgreSQL database company. To learn more visit the [timescale.com](https://www.timescale.com).
+
+Timescale Cloud is a high-performance, developer focused, cloud platform that provides PostgreSQL services
+for the most demanding AI, time-series, analytics, and event workloads. Timescale Cloud is ideal for production applications and provides high availability, streaming backups, upgrades over time, roles and permissions, and great security.
+
+[pgai-plpython]: https://github.com/postgres-ai/postgres-howtos/blob/main/0047_how_to_install_postgres_16_with_plpython3u.md
+[asdf-postgres]: https://github.com/smashedtoatoms/asdf-postgres
+[asdf]: https://github.com/asdf-vm/asdf
+[python3]: https://www.python.org/downloads/
+[pip]: https://pip.pypa.io/en/stable/installation/#supported-methods
+[plpython3u]: https://www.postgresql.org/docs/current/plpython.html
+[pgvector]: https://github.com/pgvector/pgvector
+[pgvector-install]: https://github.com/pgvector/pgvector?tab=readme-ov-file#installation
+[python-virtual-environment]: https://packaging.python.org/en/latest/tutorials/installing-packages/#creating-and-using-virtual-environments
+[create-a-new-service]: https://console.cloud.timescale.com/dashboard/create_services
+
+|Linux/macOS|Linux i386|Windows|Coverity|Code Coverage|OpenSSF|
+|:---:|:---:|:---:|:---:|:---:|:---:|
+|[![Build Status Linux/macOS](https://github.com/timescale/timescaledb/actions/workflows/linux-build-and-test.yaml/badge.svg?branch=main&event=schedule)](https://github.com/timescale/timescaledb/actions/workflows/linux-build-and-test.yaml?query=workflow%3ARegression+branch%3Amain+event%3Aschedule)|[![Build Status Linux i386](https://github.com/timescale/timescaledb/actions/workflows/linux-32bit-build-and-test.yaml/badge.svg?branch=main&event=schedule)](https://github.com/timescale/timescaledb/actions/workflows/linux-32bit-build-and-test.yaml?query=workflow%3ARegression+branch%3Amain+event%3Aschedule)|[![Windows build status](https://github.com/timescale/timescaledb/actions/workflows/windows-build-and-test.yaml/badge.svg?branch=main&event=schedule)](https://github.com/timescale/timescaledb/actions/workflows/windows-build-and-test.yaml?query=workflow%3ARegression+branch%3Amain+event%3Aschedule)|[![Coverity Scan Build Status](https://scan.coverity.com/projects/timescale-timescaledb/badge.svg)](https://scan.coverity.com/projects/timescale-timescaledb)|[![Code Coverage](https://codecov.io/gh/timescale/timescaledb/branch/main/graphs/badge.svg?branch=main)](https://codecov.io/gh/timescale/timescaledb)|[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/8012/badge)](https://www.bestpractices.dev/projects/8012)|
+
+
+## TimescaleDB
+
+TimescaleDB is an open-source database designed to make SQL scalable for
+time-series data.  It is engineered up from PostgreSQL and packaged as a
+PostgreSQL extension, providing automatic partitioning across time and space
+(partitioning key), as well as full SQL support.
+
+If you prefer not to install or administer your instance of TimescaleDB, try the 
+30 day free trial of [Timescale](https://console.cloud.timescale.com/signup), our fully managed cloud offering. 
+Timescale is pay-as-you-go. We don't charge for storage you dont use, backups, snapshots, ingress or egress. 
+
+To determine which option is best for you, see [Timescale Products](https://tsdb.co/GitHubTimescaleProducts)
+for more information about our Apache-2 version, TimescaleDB Community (self-hosted), and Timescale 
+Cloud (hosted), including: feature comparisons, FAQ, documentation, and support.
+
+Below is an introduction to TimescaleDB. For more information, please check out 
+these other resources:
+- [Developer Documentation](https://docs.timescale.com/getting-started/latest/services/)
+- [Slack Channel](https://slack-login.timescale.com)
+- [Timescale Community Forum](https://www.timescale.com/forum/)
+- [Timescale Release Notes & Future Plans](https://tsdb.co/GitHubTimescaleReleaseNotes)
+
+For reference and clarity, all code files in this repository reference
+licensing in their header (either the Apache-2-open-source license
+or [Timescale License (TSL)](https://github.com/timescale/timescaledb/blob/main/tsl/LICENSE-TIMESCALE)
+). Apache-2 licensed binaries can be built by passing `-DAPACHE_ONLY=1` to `bootstrap`.
+
+[Contributors welcome.](https://github.com/timescale/timescaledb/blob/main/CONTRIBUTING.md)
+
+(To build TimescaleDB from source, see instructions in [_Building from source_](https://github.com/timescale/timescaledb/blob/main/docs/BuildSource.md).)
+
+### Using TimescaleDB
+
+TimescaleDB scales PostgreSQL for time-series data via automatic
+partitioning across time and space (partitioning key), yet retains
+the standard PostgreSQL interface.
+
+In other words, TimescaleDB exposes what look like regular tables, but
+are actually only an
+abstraction (or a virtual view) of many individual tables comprising the
+actual data. This single-table view, which we call a
+[hypertable](https://tsdb.co/GitHubTimescaleHypertable),
+is comprised of many chunks, which are created by partitioning
+the hypertable's data in either one or two dimensions: by a time
+interval, and by an (optional) "partition key" such as
+device id, location, user id, etc. 
+
+Virtually all user interactions with TimescaleDB are with
+hypertables. Creating tables and indexes, altering tables, inserting
+data, selecting data, etc., can (and should) all be executed on the
+hypertable.
+
+From the perspective of both use and management, TimescaleDB just
+looks and feels like PostgreSQL, and can be managed and queried as
+such.
+
+#### Before you start
+
+PostgreSQL's out-of-the-box settings are typically too conservative for modern
+servers and TimescaleDB. You should make sure your `postgresql.conf`
+settings are tuned, either by using [timescaledb-tune](https://github.com/timescale/timescaledb-tune) 
+or doing it manually.
+
+#### Creating a hypertable
+
+```sql
+-- Do not forget to create timescaledb extension
+CREATE EXTENSION timescaledb;
+
+-- We start by creating a regular SQL table
+CREATE TABLE conditions (
+  time        TIMESTAMPTZ       NOT NULL,
+  location    TEXT              NOT NULL,
+  temperature DOUBLE PRECISION  NULL,
+  humidity    DOUBLE PRECISION  NULL
+);
+
+-- Then we convert it into a hypertable that is partitioned by time
+SELECT create_hypertable('conditions', 'time');
+```
+
+- [Quick start: Creating hypertables](https://docs.timescale.com/use-timescale/latest/hypertables/create/)
+- [Reference examples](https://tsdb.co/GitHubTimescaleHypertableReference)
+
+#### Inserting and querying data
+
+Inserting data into the hypertable is done via normal SQL commands:
+
+```sql
+INSERT INTO conditions(time, location, temperature, humidity)
+  VALUES (NOW(), 'office', 70.0, 50.0);
+
+SELECT * FROM conditions ORDER BY time DESC LIMIT 100;
+
+SELECT time_bucket('15 minutes', time) AS fifteen_min,
+    location, COUNT(*),
+    MAX(temperature) AS max_temp,
+    MAX(humidity) AS max_hum
+  FROM conditions
+  WHERE time > NOW() - interval '3 hours'
+  GROUP BY fifteen_min, location
+  ORDER BY fifteen_min DESC, max_temp DESC;
+```
+
+In addition, TimescaleDB includes additional functions for time-series
+analysis that are not present in vanilla PostgreSQL. (For example, the `time_bucket` function above.)
+
+- [Quick start: Basic operations](https://tsdb.co/GitHubTimescaleBasicOperations)
+- [Reference examples](https://tsdb.co/GitHubTimescaleWriteData)
+- [TimescaleDB API](https://tsdb.co/GitHubTimescaleAPI)
+
+### Installation
+
+[Timescale](https://tsdb.co/GitHubTimescale), a fully managed TimescaleDB in the cloud, is
+available via a free trial. Create a PostgreSQL database in the cloud with TimescaleDB pre-installed
+so you can power your application with TimescaleDB without the management overhead.
+
+TimescaleDB is also available pre-packaged for several platforms such as Linux, Windows, MacOS, Docker, and 
+Kubernetes. For more information, see [Install TimescaleDB](https://docs.timescale.com/self-hosted/latest/install/).
+
+To build from source, see [Building from source](https://github.com/timescale/timescaledb/blob/main/docs/BuildSource.md).
+
+## Resources
+
+### Architecture documents
+
+- [Basic TimescaleDB Features](tsl/README.md)
+- [Advanced TimescaleDB Features](tsl/README.md)
+- [Testing TimescaleDB](test/README.md)
+
+### Useful tools
+
+- [timescaledb-tune](https://github.com/timescale/timescaledb-tune): Helps
+set your PostgreSQL configuration settings based on your system's resources.
+- [timescaledb-parallel-copy](https://github.com/timescale/timescaledb-parallel-copy):
+Parallelize your initial bulk loading by using PostgreSQL's `COPY` across
+multiple workers.
+
+### Additional documentation
+
+- [Why use TimescaleDB?](https://tsdb.co/GitHubTimescaleIntro)
+- [Migrating from PostgreSQL](https://docs.timescale.com/migrate/latest/)
+- [Writing data](https://tsdb.co/GitHubTimescaleWriteData)
+- [Querying and data analytics](https://tsdb.co/GitHubTimescaleReadData)
+- [Tutorials and sample data](https://tsdb.co/GitHubTimescaleTutorials)
+
+### Community & help
+
+- [Slack Channel](https://slack.timescale.com)
+- [Github Issues](https://github.com/timescale/timescaledb/issues)
+- [Timescale Support](https://tsdb.co/GitHubTimescaleSupport): see support options (community & subscription)
+
+### Releases & updates
+
+ - [Timescale Release Notes & Future Plans](https://tsdb.co/GitHubTimescaleReleaseNotes): see planned and
+   in-progress updates and detailed information about current and past
+   releases. - [Subscribe to Timescale Release
+   Notes](https://tsdb.co/GitHubTimescaleGetReleaseNotes) to get
+   notified about new releases, fixes, and early access/beta programs.
+
+### Contributing
+
+- [Contributor instructions](https://github.com/timescale/timescaledb/blob/main/CONTRIBUTING.md)
+- [Code style guide](https://github.com/timescale/timescaledb/blob/main/docs/StyleGuide.md)

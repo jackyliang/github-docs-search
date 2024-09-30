@@ -1,0 +1,11 @@
+anthropic
+pgvector
+psycopg2-binary
+sentence-transformers
+fastapi
+uvicorn
+scrapy
+openai
+tiktoken
+langchain
+numpy
