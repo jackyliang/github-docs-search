@@ -85,9 +85,8 @@ Some Github docs files are included in `/sample-data/` containing README for
      ```
 
 7. **Notes**
-   - Ensure your PostgreSQL database is configured to handle vector operations.
+   - Ensure Timescale DB is configured to handle vector operations.
    - The script assumes you have the necessary permissions to create extensions and tables in your database.
    - Adjust the `CharacterTextSplitter` parameters in the `read_custom_dataset` function if you need different chunking behavior.
-   - The script uses OpenAI's embedding model and Anthropic's Claude model. Ensure you have sufficient API credits.
-
-By following these steps, you should be able to set up and run the `docs_server.py` script, creating a functional RAG system with a vector database backend.
+   - The script uses OpenAI's embedding model and Anthropic's Claude model. Ensure you have sufficient API credits. 
+   - The `index.html` file is a simple React frontend that allows you to search the documentation. It uses FastAPI's `query` endpoint to get search results.
