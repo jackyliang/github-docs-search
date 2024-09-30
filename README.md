@@ -76,7 +76,7 @@ Some Github docs files are included in `/sample-data/` containing README for
      ```bash
      curl -X POST "http://localhost:8000/query" \
           -H "Content-Type: application/json" \
-          -d '{"question": "What is the main topic of this document?"}'
+          -d '{"question": "How do you install pgvectorscale?"}'
      ```
 
    - View the first few documents:
