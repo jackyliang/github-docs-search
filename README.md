@@ -4,6 +4,8 @@ This is a Github Documentation Search Sample App built with Timescale DB, pgvect
 
 This Sample App lets you easily have a document search app setup and running on your local machine. Additionally, it allows you to load data from text files, create embeddings, chunks your data, and perform semantic search over the data. 
 
+You don't need to know anything about Timescale DB, pgvectorscale, or even Postgres to get this running. You can just focus on building out the frontend and gathering your own documentation! 
+
 *Built by Jacky Liang*
 
 ![image](https://github.com/user-attachments/assets/6e9274c5-ba01-48eb-baea-453dfe9e64b1)
