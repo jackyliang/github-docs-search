@@ -8,7 +8,7 @@ You don't need to know anything about Timescale DB, pgvectorscale, or even Postg
 
 *Built by Jacky Liang*
 
-![image](https://github.com/user-attachments/assets/6e9274c5-ba01-48eb-baea-453dfe9e64b1)
+![image](https://github.com/user-attachments/assets/dde2fecd-7202-4618-bafb-b7c47935f72f)
 
 ## Installation and Setup Instructions
 
@@ -120,10 +120,13 @@ Feel free to add your own Github README.md files to the `/sample-data/` folder.
 - [ ] Automatically load README.md files from Github repositories
 - [ ] Implement one-click deployment to Vercel
 
+## Contributing
+
+Feel free to file an issue or create a PR. Thank you for contributing to open source. 
+
 ## Notes 
 
-   - Ensure Timescale DB is configured to handle vector operations.
-   - The script assumes you have the necessary permissions to create extensions and tables in your database.
+   - The script assumes you have the necessary permissions to create extensions and tables in your Timescale DB.
    - Adjust the `CharacterTextSplitter` parameters in the `read_custom_dataset` function if you need different chunking behavior.
    - The script uses OpenAI's embedding model and Anthropic's Claude model. Ensure you have sufficient API credits. 
    - The `index.html` file is a simple React frontend that allows you to search the documentation. It uses FastAPI's `query` endpoint to get search results.
