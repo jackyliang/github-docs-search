@@ -1,18 +1,12 @@
-# python rag_server.py
+# python docs_server.py
 
 # Load data
 # curl -X POST "http://localhost:8000/load_data" \
     #  -H "Content-Type: application/json" \
-    #  -d '{"file_path": "/Users/jacky/Code/answerhq/utilities/Scripts/output/docs.timescale.com/results.txt"}'
+    #  -d '{"file_path": "./docs-assistant/sample-data/github-docs.txt"}'
 
 # Query data
-# curl -X POST "http://localhost:8000/query" -H "Content-Type: application/json" -d '{"question": "What is the main topic of this document?"}'
-
-# Delete index
-# curl -X DELETE "http://localhost:8000/delete_index/documents_embedding_idx"
-
-# List indexes
-# curl "http://localhost:8000/list_indexes"
+# curl -X POST "http://localhost:8000/query" -H "Content-Type: application/json" -d '{"question": "What is pgvectorscale?"}'
 
 # Head documents (show first 5)
 # curl "http://localhost:8000/head_documents"
@@ -29,16 +23,17 @@ import openai
 from openai import OpenAI
 import threading
 from langchain.text_splitter import CharacterTextSplitter
+import time
+import random
 
 app = FastAPI()
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 def relevant_search(conn, query):
@@ -50,14 +45,15 @@ def relevant_search(conn, query):
         print(f"Number of relevant documents found: {len(results)}")
         return results
 
-def read_custom_dataset(file_path):
+def read_file_content(file_path):
     with open(file_path, 'r', encoding='utf-8') as file:
-        content = file.read()
-    
+        return file.read()
+
+def chunk_text(content, chunk_size=256, chunk_overlap=20):
     text_splitter = CharacterTextSplitter(
         separator="\n\n",
-        chunk_size=256,
-        chunk_overlap=20
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap
     )
     
     chunks = text_splitter.split_text(content)
@@ -69,6 +65,10 @@ def read_custom_dataset(file_path):
         print("-" * 50)
     
     return chunks
+
+def read_custom_dataset(file_path):
+    content = read_file_content(file_path)
+    return chunk_text(content)
 
 CONNECTION = os.environ.get("DATABASE_URL")
 conn = psycopg2.connect(CONNECTION)
@@ -105,30 +105,43 @@ if not ANTHROPIC_API_KEY:
     raise ValueError("ANTHROPIC_API_KEY environment variable is not set")
 
 def rag_function(conn, query):
-    relevant_docs = relevant_search(conn, query)
-    relevant_text = " ".join([doc[0] for doc in relevant_docs])
-    full_query = (f"Context: The following are relevant passages related to the query.\n"
-        f"{relevant_text}\n\n"
-        f"Based on the above context, please answer the following question:\n"
-        f"Question: {query}")
-    message = anthropic_client.messages.create(
-        model="claude-3-5-sonnet-20240620",
-        max_tokens=4096,
-        temperature=0,
-        system="You are a helpful assistant made by Jacky Liang, an applicant for the role of Developer Advocate for TimescaleDB. Given a query and context, provide accurate information. Don't hallucinate if the context doesn't provide relevant information. Answer directly, don't mention the context. Write your answer in Markdown.",
-        messages=[
-            {
-                "role": "user",
-                "content": [
+    max_retries = 3
+    base_delay = 1
+
+    for attempt in range(max_retries):
+        try:
+            relevant_docs = relevant_search(conn, query)
+            relevant_text = " ".join([doc[0] for doc in relevant_docs])
+            full_query = (f"Context: The following are relevant passages related to the query.\n"
+                f"{relevant_text}\n\n"
+                f"Based on the above context, please answer the following question:\n"
+                f"Question: {query}\n\n"
+                f"Please include references to the source text as [1], [2], [3], etc. at the end of your response in a numeric list. It can be a sentence or two if it's too long, truncated.")
+            message = anthropic_client.messages.create(
+                model="claude-3-5-sonnet-20240620",
+                max_tokens=4096,
+                temperature=0,
+                system="You are a helpful assistant made by Jacky Liang, an applicant for the role of Developer Advocate for TimescaleDB. Given a query and context, provide accurate information. Don't hallucinate if the context doesn't provide relevant information. Answer directly, don't mention the context. Write your answer in Markdown.",
+                messages=[
                     {
-                        "type": "text",
-                        "text": full_query
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": full_query
+                            }
+                        ]
                     }
                 ]
-            }
-        ]
-    )
-    return message.content
+            )
+            return message.content
+        except Exception as e:
+            if attempt < max_retries - 1:
+                delay = random.uniform(base_delay, base_delay * 2)
+                time.sleep(delay)
+                continue
+            else:
+                raise HTTPException(status_code=500, detail=str(e))
 
 class Query(BaseModel):
     question: str
@@ -156,8 +169,8 @@ async def load_data(request: LoadDataRequest):
         print("Database insertion completed.")
 
         print("Creating index...")
-        ivfflat = """CREATE INDEX IF NOT EXISTS documents_embedding_idx ON documents USING diskann (embedding)"""
-        cursor.execute(ivfflat)
+        index = """CREATE INDEX IF NOT EXISTS documents_embedding_idx ON documents USING diskann (embedding)"""
+        cursor.execute(index)
         conn.commit()
         print("Index creation completed.")
 
